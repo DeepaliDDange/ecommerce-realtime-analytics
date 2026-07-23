@@ -59,9 +59,6 @@ print(f"New raw record count: {raw_df.count()}")
 
 
 # 2. Clean + standardise.
-#    - drop exact duplicate events (at-least-once delivery can dupe)
-#    - cast types and derive partition / analysis columns
-#    - normalise text so grouping is consistent
 
 clean_df = (
     raw_df
@@ -97,8 +94,7 @@ processed_df = clean_df.select(
 
 
 # 3. Write Snappy-compressed Parquet, partitioned by date + category.
-#    coalesce(1) keeps the demo output tidy; raise it once you have
-#    real volume so you are not bottlenecked on a single writer.
+
 
 (
     processed_df
