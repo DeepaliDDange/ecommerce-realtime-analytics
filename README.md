@@ -29,7 +29,7 @@ companies run in production.
                                     │  S3 RAW zone      │  (newline JSON,
                                     │  orders/y=/m=/d=  │   date-partitioned)
                                     └────────┬─────────┘
-                                             │   BATCH PATH (nightly)
+                                             │   BATCH PATH 
                   EventBridge Scheduler ────▶│
                   (cron 02:00 UTC)           ▼
                                     ┌──────────────────┐
@@ -49,7 +49,7 @@ companies run in production.
                                     └────────┬─────────┘
                                              ▼
                                     ┌──────────────────┐
-                                    │  Athena (SQL)     │  ── optional ──▶ QuickSight
+                                    │  Athena (SQL)     │  
                                     └──────────────────┘
 ```
 
@@ -89,10 +89,7 @@ The platform splits into two paths:
 ├── athena/                # Sample analytical SQL
 ├── sam/                   # Infrastructure as code (AWS SAM)
 ├── architecture/          # Detailed design notes
-└── docs/
-    ├── DEPLOYMENT-SAM.md      # Step-by-step deploy + teardown (SAM)
-    ├── INTERVIEW_QUESTIONS.md # Q&A tied to this project
-    └── PERFORMANCE.md         # Optimization / scaling notes
+
 ```
 
 ## Quickstart
@@ -125,13 +122,4 @@ shards bill hourly even when idle**. Tear everything down when you are done:
 cd terraform
 terraform destroy
 ```
-
-## Design highlights (a.k.a. interview talking points)
-
-- **Streaming + batch in one system** (a "Kappa-ish" lambda architecture).
-- **Partitioned, columnar Parquet** for cheap, fast Athena queries.
-- **Atomic DynamoDB counters** to avoid read-modify-write races.
-- **Partial-batch failure handling** so one bad record doesn't block a shard.
-- **Glue job bookmarks** so nightly runs are incremental and idempotent.
-- **Least-privilege IAM** scoped to specific ARNs and actions.
 
