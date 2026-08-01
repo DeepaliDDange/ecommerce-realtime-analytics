@@ -22,6 +22,3 @@ venv/
 docs/
 architecture/
 
-sam/
-sam/samconfig.toml
-sam/template.yaml
