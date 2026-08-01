@@ -2,7 +2,7 @@
 
 A production-style data platform that ingests e-commerce order events in
 real time, serves live metrics, and curates a queryable analytics data lake.
-Built entirely with serverless AWS services and deployed with Terraform.
+Built entirely with serverless AWS services and deployed with SAM.
 
 This project demonstrates an **end-to-end data pipeline** — streaming
 ingestion, real-time aggregation, a batch ETL layer, a partitioned Parquet
@@ -119,7 +119,7 @@ Everything here is serverless / pay-per-use, but **Kinesis provisioned
 shards bill hourly even when idle**. Tear everything down when you are done:
 
 ```bash
-cd terraform
-terraform destroy
+cd sam
+sam delete
 ```
 
