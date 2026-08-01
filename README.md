@@ -88,7 +88,7 @@ The platform splits into two paths:
 ├── glue/                  # PySpark ETL job (raw -> Parquet)
 ├── athena/                # Sample analytical SQL
 ├── sam/                   # Infrastructure as code (AWS SAM)
-├── architecture/          # Detailed design notes
+
 
 ```
 
