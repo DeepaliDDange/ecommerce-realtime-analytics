@@ -6,7 +6,7 @@ Description: >
   batch layer (Glue -> Parquet -> Catalog -> Athena), all serverless.
 
 # ---------------------------------------------------------------------------
-# Parameters (equivalent to Terraform variables)
+# Parameters 
 # ---------------------------------------------------------------------------
 Parameters:
   ProjectName:
@@ -314,7 +314,7 @@ Resources:
         Input: !Sub '{"JobName": "${GlueJob}"}'
 
 # ---------------------------------------------------------------------------
-# Outputs (equivalent to Terraform outputs)
+# Outputs 
 # ---------------------------------------------------------------------------
 Outputs:
   KinesisStreamName:
