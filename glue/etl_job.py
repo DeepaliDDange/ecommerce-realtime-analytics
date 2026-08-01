@@ -12,7 +12,7 @@ Why a DynamicFrame for the read?
   processed before. That makes the nightly "append" idempotent instead of
   reprocessing (and duplicating) the entire history every night.
 
-Job parameters (set in the Terraform job definition):
+Job parameters(set as Default Arguments on the Glue job in the SAM template):
   --RAW_PATH         s3://<raw-bucket>/orders/
   --PROCESSED_PATH   s3://<processed-bucket>/orders_processed/
   --DATABASE         Glue catalog database (context/logging)
