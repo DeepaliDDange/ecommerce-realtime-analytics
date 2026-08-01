@@ -1,0 +1,354 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  E-Commerce Real-Time Analytics Platform.
+  Streaming ingestion (Kinesis -> Lambda -> DynamoDB/SNS/S3) plus a nightly
+  batch layer (Glue -> Parquet -> Catalog -> Athena), all serverless.
+
+# ---------------------------------------------------------------------------
+# Parameters (equivalent to Terraform variables)
+# ---------------------------------------------------------------------------
+Parameters:
+  ProjectName:
+    Type: String
+    Default: ecommerce-analytics
+    Description: Prefix applied to resource names.
+
+  AlertEmail:
+    Type: String
+    Default: ""
+    Description: Email for high-value order alerts. Leave blank to skip.
+
+  HighValueThreshold:
+    Type: Number
+    Default: 250
+    Description: Order total (USD) above which an SNS alert is published.
+
+  KinesisShardCount:
+    Type: Number
+    Default: 1
+    Description: Number of shards for the Kinesis stream.
+
+Conditions:
+  HasAlertEmail: !Not [!Equals [!Ref AlertEmail, ""]]
+
+# ---------------------------------------------------------------------------
+# Globals: defaults applied to all Serverless functions.
+# ---------------------------------------------------------------------------
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 60
+    MemorySize: 256
+
+Resources:
+
+  # =========================================================================
+  # S3 data lake (raw / processed / scripts)
+  # BucketName is omitted so CloudFormation generates globally-unique names.
+  # =========================================================================
+  RawBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-raw-json
+            Status: Enabled
+            Prefix: orders/
+            ExpirationInDays: 30
+
+  ProcessedBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  ScriptsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  # =========================================================================
+  # Kinesis Data Stream — ingestion backbone
+  # =========================================================================
+  OrdersStream:
+    Type: AWS::Kinesis::Stream
+    Properties:
+      Name: !Sub "${ProjectName}-orders-stream"
+      RetentionPeriodHours: 24
+      StreamModeDetails:
+        StreamMode: PROVISIONED
+      ShardCount: !Ref KinesisShardCount
+
+  # =========================================================================
+  # DynamoDB — real-time metrics (composite key, atomic counters)
+  # =========================================================================
+  MetricsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${ProjectName}-realtime-metrics"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+
+  # =========================================================================
+  # SNS — high-value order alerts
+  # =========================================================================
+  AlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${ProjectName}-high-value-alerts"
+
+  AlertEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlertEmail
+    Properties:
+      TopicArn: !Ref AlertsTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  # =========================================================================
+  # Lambda stream processor (SAM Serverless::Function)
+  #   - CodeUri is packaged automatically by `sam build`.
+  #   - The Kinesis event auto-creates the EventSourceMapping AND the
+  #     kinesis read permissions, so we only add S3/DynamoDB/SNS policies.
+  #   - SAM policy templates keep these least-privilege and readable.
+  # =========================================================================
+  StreamProcessorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-stream-processor"
+      CodeUri: ../lambda/stream_processor/
+      Handler: lambda_function.handler
+      Environment:
+        Variables:
+          RAW_BUCKET: !Ref RawBucket
+          METRICS_TABLE: !Ref MetricsTable
+          ALERT_TOPIC_ARN: !Ref AlertsTopic
+          HIGH_VALUE_THRESHOLD: !Ref HighValueThreshold
+      Policies:
+        - S3WritePolicy:
+            BucketName: !Ref RawBucket
+        - DynamoDBCrudPolicy:
+            TableName: !Ref MetricsTable
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt AlertsTopic.TopicName
+      Events:
+        OrderStream:
+          Type: Kinesis
+          Properties:
+            Stream: !GetAtt OrdersStream.Arn
+            StartingPosition: LATEST
+            BatchSize: 100
+            MaximumBatchingWindowInSeconds: 10
+            ParallelizationFactor: 1
+            BisectBatchOnFunctionError: true
+            MaximumRetryAttempts: 5
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+
+  StreamProcessorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${ProjectName}-stream-processor"
+      RetentionInDays: 14
+
+  # =========================================================================
+  # Glue — IAM role, database, ETL job, crawler, post-job trigger
+  # =========================================================================
+  GlueRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-glue-role"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      Policies:
+        - PolicyName: glue-s3-access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadRaw
+                Effect: Allow
+                Action: [s3:GetObject, s3:ListBucket]
+                Resource:
+                  - !GetAtt RawBucket.Arn
+                  - !Sub "${RawBucket.Arn}/*"
+              - Sid: ReadWriteProcessedAndScripts
+                Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:DeleteObject, s3:ListBucket]
+                Resource:
+                  - !GetAtt ProcessedBucket.Arn
+                  - !Sub "${ProcessedBucket.Arn}/*"
+                  - !GetAtt ScriptsBucket.Arn
+                  - !Sub "${ScriptsBucket.Arn}/*"
+
+  GlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: analytics_db
+
+  GlueJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: !Sub "${ProjectName}-etl-job"
+      Role: !GetAtt GlueRole.Arn
+      GlueVersion: "4.0"
+      WorkerType: G.1X
+      NumberOfWorkers: 2
+      Timeout: 30
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://${ScriptsBucket}/scripts/etl_job.py"
+      DefaultArguments:
+        "--RAW_PATH": !Sub "s3://${RawBucket}/orders/"
+        "--PROCESSED_PATH": !Sub "s3://${ProcessedBucket}/orders_processed/"
+        "--DATABASE": "analytics_db"
+        "--job-language": "python"
+        "--job-bookmark-option": "job-bookmark-enable"
+        "--enable-metrics": "true"
+        "--TempDir": !Sub "s3://${ScriptsBucket}/tmp/"
+
+  ProcessedCrawler:
+    Type: AWS::Glue::Crawler
+    DependsOn: GlueDatabase
+    Properties:
+      Name: !Sub "${ProjectName}-processed-crawler"
+      Role: !GetAtt GlueRole.Arn
+      DatabaseName: analytics_db
+      Targets:
+        S3Targets:
+          - Path: !Sub "s3://${ProcessedBucket}/orders_processed/"
+      Configuration: '{"Version":1.0,"Grouping":{"TableGroupingPolicy":"CombineCompatibleSchemas"}}'
+
+  # Runs the crawler automatically once the ETL job succeeds.
+  CrawlerAfterEtlTrigger:
+    Type: AWS::Glue::Trigger
+    Properties:
+      Name: !Sub "${ProjectName}-crawler-after-etl"
+      Type: CONDITIONAL
+      StartOnCreation: true
+      Actions:
+        - CrawlerName: !Ref ProcessedCrawler
+      Predicate:
+        Conditions:
+          - JobName: !Ref GlueJob
+            State: SUCCEEDED
+            LogicalOperator: EQUALS
+
+  # =========================================================================
+  # EventBridge Scheduler — nightly batch trigger (universal Glue target)
+  # =========================================================================
+  SchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-scheduler-role"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: start-glue-job
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: glue:StartJobRun
+                Resource: !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:job/${GlueJob}"
+
+  NightlyEtlSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: !Sub "${ProjectName}-nightly-etl"
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      ScheduleExpression: "cron(0 2 * * ? *)"
+      ScheduleExpressionTimezone: "UTC"
+      Target:
+        Arn: "arn:aws:scheduler:::aws-sdk:glue:startJobRun"
+        RoleArn: !GetAtt SchedulerRole.Arn
+        Input: !Sub '{"JobName": "${GlueJob}"}'
+
+# ---------------------------------------------------------------------------
+# Outputs (equivalent to Terraform outputs)
+# ---------------------------------------------------------------------------
+Outputs:
+  KinesisStreamName:
+    Description: Pass to the data generator with --stream
+    Value: !Ref OrdersStream
+
+  RawBucket:
+    Value: !Ref RawBucket
+
+  ProcessedBucket:
+    Value: !Ref ProcessedBucket
+
+  ScriptsBucket:
+    Value: !Ref ScriptsBucket
+
+  DynamoDBTable:
+    Value: !Ref MetricsTable
+
+  SnsTopicArn:
+    Value: !Ref AlertsTopic
+
+  GlueJobName:
+    Value: !Ref GlueJob
+
+  GlueCrawlerName:
+    Value: !Ref ProcessedCrawler
+
+  LambdaFunction:
+    Value: !Ref StreamProcessorFunction
+
+  AthenaResultsLocation:
+    Description: Set this as your Athena query result location.
+    Value: !Sub "s3://${ScriptsBucket}/athena-results/"
+
+  UploadScriptCommand:
+    Description: Run this ONCE after deploy to upload the Glue ETL script.
+    Value: !Sub "aws s3 cp ../glue/etl_job.py s3://${ScriptsBucket}/scripts/etl_job.py"

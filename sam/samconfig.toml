@@ -1,0 +1,18 @@
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "ecommerce-analytics"
+resolve_s3 = true
+capabilities = "CAPABILITY_NAMED_IAM"
+confirm_changeset = true
+# Override parameters here, e.g.:
+# parameter_overrides = "AlertEmail=you@example.com HighValueThreshold=250"
+s3_prefix = "ecommerce-analytics"
+parameter_overrides = "ProjectName=\"ecommerce-analytics\" AlertEmail=\"\" HighValueThreshold=\"250\" KinesisShardCount=\"1\""
+image_repositories = []
+
+[default.build.parameters]
+cached = true
+
+[default.global.parameters]
+region = "us-east-2"
